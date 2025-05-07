@@ -1,0 +1,17 @@
+[tool.poetry]
+name = "ollama-pdf-rag"
+version = "0.1.0"
+description = ""
+authors = ["<michael.koehler@edag.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.10"
+ollama = "^0.4.8"
+streamlit = "^1.45.0"
+
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

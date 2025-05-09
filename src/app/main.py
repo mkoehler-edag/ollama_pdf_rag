@@ -17,7 +17,7 @@ import warnings
 # Suppress torch warning
 warnings.filterwarnings('ignore', category=UserWarning, message='.*torch.classes.*')
 
-from langchain_community.document_loaders import UnstructuredPDFLoader
+from langchain_community.document_loaders import UnstructuredPDFLoader, UnstructuredMarkdownLoader, TextLoader
 from langchain_ollama import OllamaEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import Chroma
@@ -27,6 +27,7 @@ from langchain_ollama import ChatOllama
 from langchain_core.runnables import RunnablePassthrough
 from langchain.retrievers.multi_query import MultiQueryRetriever
 from typing import List, Tuple, Dict, Any, Optional
+# from chromadb import PersistentClient
 
 # Set protobuf environment variable to avoid error messages
 # This might cause some issues with latency but it's a tradeoff
@@ -80,7 +81,7 @@ def extract_model_names(models_info: Any) -> Tuple[str, ...]:
         return tuple()
 
 
-def create_vector_db(file_upload) -> Chroma:
+def create_vector_db(file_upload, loader, temp_dir) -> Chroma:
     """
     Create a vector database from an uploaded PDF file.
 
@@ -91,18 +92,12 @@ def create_vector_db(file_upload) -> Chroma:
         Chroma: A vector store containing the processed document chunks.
     """
     logger.info(f"Creating vector DB from file upload: {file_upload.name}")
-    temp_dir = tempfile.mkdtemp()
-
-    path = os.path.join(temp_dir, file_upload.name)
-    with open(path, "wb") as f:
-        f.write(file_upload.getvalue())
-        logger.info(f"File saved to temporary path: {path}")
-        loader = UnstructuredPDFLoader(path)
-        data = loader.load()
-
+    data = loader.load()
+    print("data:", data[0].page_content)
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=7500, chunk_overlap=100)
     chunks = text_splitter.split_documents(data)
     logger.info("Document split into chunks")
+    logger.info(chunks)
 
     # Updated embeddings configuration with persistent storage
     embeddings = OllamaEmbeddings(model="nomic-embed-text")
@@ -113,6 +108,24 @@ def create_vector_db(file_upload) -> Chroma:
         collection_name=f"pdf_{hash(file_upload.name)}"  # Unique collection name per file
     )
     logger.info("Vector DB created with persistent storage")
+
+    # ##################################################
+    # # ❶ point at the folder that holds chroma.sqlite3
+    # client = PersistentClient(path=PERSIST_DIRECTORY)  # <- your persist_directory
+    #
+    # # ❷ list what’s in there
+    # for col in client.list_collections():
+    #     print(col.name, col.count())
+    #
+    #     # peek at the first 5 entries
+    #     sample = col.peek(5)  # --> {'ids': [...], 'documents': [...], ...}
+    #     print(sample["ids"][:3], "...")
+    #
+    #     # full fetch of one ID with vectors
+    #     row = col.get(ids=[sample["ids"][0]],
+    #                   include=["embeddings", "documents", "metadatas"])
+    #     print(row)
+
 
     shutil.rmtree(temp_dir)
     logger.info(f"Temporary directory {temp_dir} removed")
@@ -148,11 +161,23 @@ def process_question(question: str, vector_db: Chroma, selected_model: str) -> s
     )
 
     # Set up retriever
-    retriever = MultiQueryRetriever.from_llm(
-        vector_db.as_retriever(), 
-        llm,
-        prompt=QUERY_PROMPT
-    )
+    # retriever = MultiQueryRetriever.from_llm(
+    #     vector_db.as_retriever(),
+    #     llm,
+    #     prompt=QUERY_PROMPT
+    # )
+
+    # Alternative retriever which uses only original question
+    retriever = vector_db.as_retriever(search_kwargs={"k": 3})
+
+    # show retrieved chunks
+    docs = retriever.invoke(question)
+    for i, doc in enumerate(docs, start=1):
+        print(f"=== Chunk {i} ===")
+        print(doc.page_content.strip())  # der Text‑Abschnitt
+        if doc.metadata:
+            print("Metadaten:", doc.metadata)  # z.B. {'source': 'file.md', 'chunk': 2}
+        print()
 
     # RAG prompt template
     template = """Answer the question based ONLY on the following context:
@@ -291,20 +316,42 @@ def main() -> None:
         # Regular file upload with unique key
         file_upload = col1.file_uploader(
             "Upload a PDF file ↓", 
-            type="pdf", 
+            type=["pdf", "md"],
             accept_multiple_files=False,
             key="pdf_uploader"
         )
+        file_type = ""
+        # check file type
+        if file_upload is not None:
+            temp_dir = tempfile.mkdtemp()
+
+            path = os.path.join(temp_dir, file_upload.name)
+            with open(path, "wb") as f:
+                f.write(file_upload.getvalue())
+                logger.info(f"File saved to temporary path: {path}")
+
+            if file_upload.name.endswith(".pdf"):
+                loader = UnstructuredPDFLoader(path)
+                file_type = "pdf"
+            elif file_upload.name.endswith(".md"):
+                loader = UnstructuredMarkdownLoader(path)
+                file_type = "md"
+            else:
+                st.error("Unsupported file type. Please upload a PDF or Markdown file.")
+                return
+        else:
+            return
 
         if file_upload:
             if st.session_state["vector_db"] is None:
                 with st.spinner("Processing uploaded PDF..."):
-                    st.session_state["vector_db"] = create_vector_db(file_upload)
+                    st.session_state["vector_db"] = create_vector_db(file_upload, loader, temp_dir)
                     # Store the uploaded file in session state
                     st.session_state["file_upload"] = file_upload
                     # Extract and store PDF pages
-                    with pdfplumber.open(file_upload) as pdf:
-                        st.session_state["pdf_pages"] = [page.to_image().original for page in pdf.pages]
+                    if file_type == "pdf":
+                        with pdfplumber.open(file_upload) as pdf:
+                            st.session_state["pdf_pages"] = [page.to_image().original for page in pdf.pages]
 
     # Display PDF if pages are available
     if "pdf_pages" in st.session_state and st.session_state["pdf_pages"]:

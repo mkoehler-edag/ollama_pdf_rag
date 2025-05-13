@@ -1,0 +1,1 @@
+Gib mir als Liste die Werte für folgende Parameter: Batterie, Versorgungsspannung, Barometer und Betriebsgeräusch

@@ -93,11 +93,10 @@ def create_vector_db(file_upload, loader, temp_dir) -> Chroma:
     """
     logger.info(f"Creating vector DB from file upload: {file_upload.name}")
     data = loader.load()
-    print("data:", data[0].page_content)
+    # print("data:", data[0].page_content)
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=7500, chunk_overlap=100)
     chunks = text_splitter.split_documents(data)
     logger.info("Document split into chunks")
-    logger.info(chunks)
 
     # Updated embeddings configuration with persistent storage
     embeddings = OllamaEmbeddings(model="nomic-embed-text")
@@ -171,13 +170,13 @@ def process_question(question: str, vector_db: Chroma, selected_model: str) -> s
     retriever = vector_db.as_retriever(search_kwargs={"k": 3})
 
     # show retrieved chunks
-    docs = retriever.invoke(question)
-    for i, doc in enumerate(docs, start=1):
-        print(f"=== Chunk {i} ===")
-        print(doc.page_content.strip())  # der Text‑Abschnitt
-        if doc.metadata:
-            print("Metadaten:", doc.metadata)  # z.B. {'source': 'file.md', 'chunk': 2}
-        print()
+    # docs = retriever.invoke(question)
+    # for i, doc in enumerate(docs, start=1):
+    #     print(f"=== Chunk {i} ===")
+    #     print(doc.page_content.strip())  # der Text‑Abschnitt
+    #     if doc.metadata:
+    #         print("Metadaten:", doc.metadata)  # z.B. {'source': 'file.md', 'chunk': 2}
+    #     print()
 
     # RAG prompt template
     template = """Answer the question based ONLY on the following context:
@@ -252,7 +251,7 @@ def main() -> None:
     """
     Main function to run the Streamlit application.
     """
-    st.subheader("🧠 Ollama PDF RAG playground", divider="gray", anchor=False)
+    st.subheader("🧠 Ollama PDF and MD files RAG playground", divider="gray", anchor=False)
 
     # Get available models
     models_info = ollama.list()
@@ -315,7 +314,7 @@ def main() -> None:
     else:
         # Regular file upload with unique key
         file_upload = col1.file_uploader(
-            "Upload a PDF file ↓", 
+            "Upload a PDF or MD file ↓",
             type=["pdf", "md"],
             accept_multiple_files=False,
             key="pdf_uploader"
@@ -344,7 +343,7 @@ def main() -> None:
 
         if file_upload:
             if st.session_state["vector_db"] is None:
-                with st.spinner("Processing uploaded PDF..."):
+                with st.spinner(f"Processing uploaded {file_type} file..."):
                     st.session_state["vector_db"] = create_vector_db(file_upload, loader, temp_dir)
                     # Store the uploaded file in session state
                     st.session_state["file_upload"] = file_upload

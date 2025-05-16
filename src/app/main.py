@@ -14,6 +14,8 @@ import pdfplumber
 import ollama
 import warnings
 
+from chromadb import Settings
+
 # Suppress torch warning
 warnings.filterwarnings('ignore', category=UserWarning, message='.*torch.classes.*')
 
@@ -24,7 +26,7 @@ from langchain_community.vectorstores import Chroma
 from langchain.prompts import ChatPromptTemplate, PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_ollama import ChatOllama
-from langchain_core.runnables import RunnablePassthrough
+from langchain_core.runnables import RunnablePassthrough, RunnableLambda
 from langchain.retrievers.multi_query import MultiQueryRetriever
 from typing import List, Tuple, Dict, Any, Optional
 # from chromadb import PersistentClient
@@ -38,7 +40,7 @@ PERSIST_DIRECTORY = os.path.join("data", "vectors")
 
 # Streamlit page configuration
 st.set_page_config(
-    page_title="Ollama PDF RAG Streamlit UI",
+    page_title="Ollama PDF and MD RAG Streamlit UI",
     page_icon="🎈",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -52,6 +54,18 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
+
+# Initialize session state
+if "messages" not in st.session_state:
+    st.session_state["messages"] = []
+if "vector_db" not in st.session_state:
+    st.session_state["vector_db"] = None
+if "use_rag" not in st.session_state:
+    st.session_state["use_rag"] = True
+if "markdown_files_content" not in st.session_state:
+    st.session_state["markdown_files_content"] = []
+if "uploaded_file_names" not in st.session_state:
+    st.session_state["uploaded_file_names"] = []
 
 
 def extract_model_names(models_info: Any) -> Tuple[str, ...]:
@@ -100,11 +114,16 @@ def create_vector_db(file_upload, loader, temp_dir) -> Chroma:
 
     # Updated embeddings configuration with persistent storage
     embeddings = OllamaEmbeddings(model="nomic-embed-text")
+    client_settings = Settings(
+        anonymized_telemetry=False,
+        is_persistent=True,
+    )
     vector_db = Chroma.from_documents(
         documents=chunks,
         embedding=embeddings,
         persist_directory=PERSIST_DIRECTORY,
-        collection_name=f"pdf_{hash(file_upload.name)}"  # Unique collection name per file
+        collection_name=f"pdf_{hash(file_upload.name)}",  # Unique collection name per file
+        client_settings=client_settings
     )
     logger.info("Vector DB created with persistent storage")
 
@@ -131,6 +150,27 @@ def create_vector_db(file_upload, loader, temp_dir) -> Chroma:
     return vector_db
 
 
+def add_document_to_vector_db(file_upload, loader, temp_dir) -> None:
+    """
+    Add a document to the existing vector database.
+
+    Args:
+        file_upload (st.UploadedFile): Streamlit file upload object containing the PDF.
+        loader: Document loader for processing the uploaded file.
+    """
+    logger.info(f"Adding document to vector DB from file upload: {file_upload.name}")
+    data = loader.load()
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=7500, chunk_overlap=100)
+    chunks = text_splitter.split_documents(data)
+    logger.info("Document split into chunks")
+
+    # Add new documents to the existing vector database
+    st.session_state["vector_db"].add_documents(chunks)
+    logger.info("New documents added to vector DB")
+    shutil.rmtree(temp_dir)
+    logger.info(f"Temporary directory {temp_dir} removed")
+
+
 def process_question(question: str, vector_db: Chroma, selected_model: str) -> str:
     """
     Process a user question using the vector database and selected language model.
@@ -148,35 +188,42 @@ def process_question(question: str, vector_db: Chroma, selected_model: str) -> s
     # Initialize LLM
     llm = ChatOllama(model=selected_model)
     
-    # Query prompt template
-    QUERY_PROMPT = PromptTemplate(
-        input_variables=["question"],
-        template="""You are an AI language model assistant. Your task is to generate 2
-        different versions of the given user question to retrieve relevant documents from
-        a vector database. By generating multiple perspectives on the user question, your
-        goal is to help the user overcome some of the limitations of the distance-based
-        similarity search. Provide these alternative questions separated by newlines.
-        Original question: {question}""",
-    )
+    # Query prompt template to generate multiple questions with similar meaning
+    # QUERY_PROMPT = PromptTemplate(
+    #     input_variables=["question"],
+    #     template="""You are an AI language model assistant. Your task is to generate 2
+    #     different versions of the given user question to retrieve relevant documents from
+    #     a vector database. By generating multiple perspectives on the user question, your
+    #     goal is to help the user overcome some of the limitations of the distance-based
+    #     similarity search. Provide these alternative questions separated by newlines.
+    #     Original question: {question}""",
+    # )
 
-    # Set up retriever
+    # Set up retriever with 3 different questions to retrieve the matching chunks
     # retriever = MultiQueryRetriever.from_llm(
     #     vector_db.as_retriever(),
     #     llm,
     #     prompt=QUERY_PROMPT
     # )
 
-    # Alternative retriever which uses only original question
-    retriever = vector_db.as_retriever(search_kwargs={"k": 3})
+    if st.session_state["use_rag"]:
+        # retriever which uses vector-db chunks retrieved by similarity with original question
+        retriever = vector_db.as_retriever(search_kwargs={"k": 3})
+        logger.info("Using vector-db chunks retrieved by similarity with original question")
+        # show retrieved chunks
+        # docs = retriever.invoke(question)
+        # for i, doc in enumerate(docs, start=1):
+        #     print(f"=== Chunk {i} ===")
+        #     print(doc.page_content.strip())  # der Text‑Abschnitt
+        #     if doc.metadata:
+        #         print("Metadaten:", doc.metadata)  # z.B. {'source': 'file.md', 'chunk': 2}
+        #     print()
+    else:
+        # retriever which uses string content of the markdown files in list 'markdown_files_content'
+        combined_context = "new document\n" + "new document\n".join(st.session_state["markdown_files_content"])
+        retriever = RunnableLambda(lambda _: combined_context)
+        logger.info("Using string content of the markdown files")
 
-    # show retrieved chunks
-    # docs = retriever.invoke(question)
-    # for i, doc in enumerate(docs, start=1):
-    #     print(f"=== Chunk {i} ===")
-    #     print(doc.page_content.strip())  # der Text‑Abschnitt
-    #     if doc.metadata:
-    #         print("Metadaten:", doc.metadata)  # z.B. {'source': 'file.md', 'chunk': 2}
-    #     print()
 
     # RAG prompt template
     template = """Answer the question based ONLY on the following context:
@@ -260,97 +307,73 @@ def main() -> None:
     # Create layout
     col1, col2 = st.columns([1.5, 2])
 
-    # Initialize session state
-    if "messages" not in st.session_state:
-        st.session_state["messages"] = []
-    if "vector_db" not in st.session_state:
-        st.session_state["vector_db"] = None
-    if "use_sample" not in st.session_state:
-        st.session_state["use_sample"] = False
+    # Add checkbox for using RAG
+    st.session_state["use_rag"] = col2.toggle(
+        "Use RAG",
+        key="rag_checkbox",
+        value=True
+    )
 
     # Model selection
     if available_models:
         selected_model = col2.selectbox(
-            "Pick a model available locally on your system ↓", 
+            "Pick a model available locally on your system ↓",
             available_models,
             key="model_select"
         )
 
-    # Add checkbox for sample PDF
-    use_sample = col1.toggle(
-        "Use sample PDF (Scammer Agent Paper)", 
-        key="sample_checkbox"
+    # Regular file upload with unique key
+    file_upload = col1.file_uploader(
+        "Upload a PDF or MD file ↓",
+        type=["pdf", "md"],
+        accept_multiple_files=False,
+        key="pdf_uploader"
     )
-    
-    # Clear vector DB if switching between sample and upload
-    if use_sample != st.session_state.get("use_sample"):
-        if st.session_state["vector_db"] is not None:
-            st.session_state["vector_db"].delete_collection()
-            st.session_state["vector_db"] = None
-            st.session_state["pdf_pages"] = None
-        st.session_state["use_sample"] = use_sample
 
-    if use_sample:
-        # Use the sample PDF
-        sample_path = "data/pdfs/sample/scammer-agent.pdf"
-        if os.path.exists(sample_path):
-            if st.session_state["vector_db"] is None:
-                with st.spinner("Processing sample PDF..."):
-                    loader = UnstructuredPDFLoader(file_path=sample_path)
-                    data = loader.load()
-                    text_splitter = RecursiveCharacterTextSplitter(chunk_size=7500, chunk_overlap=100)
-                    chunks = text_splitter.split_documents(data)
-                    st.session_state["vector_db"] = Chroma.from_documents(
-                        documents=chunks,
-                        embedding=OllamaEmbeddings(model="nomic-embed-text"),
-                        persist_directory=PERSIST_DIRECTORY,
-                        collection_name="sample_pdf"
-                    )
-                    # Open and display the sample PDF
-                    with pdfplumber.open(sample_path) as pdf:
-                        st.session_state["pdf_pages"] = [page.to_image().original for page in pdf.pages]
+    temp_dir = tempfile.mkdtemp()
+    if file_upload is not None:
+        path = os.path.join(temp_dir, file_upload.name)
+        with open(path, "wb") as f:
+            f.write(file_upload.getvalue())
+            logger.info(f"File saved to temporary path: {path}")
+
+        if file_upload.name.endswith(".pdf"):
+            loader = UnstructuredPDFLoader(path)
+            file_type = "pdf"
+        elif file_upload.name.endswith(".md"):
+            loader = UnstructuredMarkdownLoader(path)
+            file_type = "md"
         else:
-            st.error("Sample PDF file not found in the current directory.")
-    else:
-        # Regular file upload with unique key
-        file_upload = col1.file_uploader(
-            "Upload a PDF or MD file ↓",
-            type=["pdf", "md"],
-            accept_multiple_files=False,
-            key="pdf_uploader"
-        )
-        file_type = ""
-        # check file type
-        if file_upload is not None:
-            temp_dir = tempfile.mkdtemp()
-
-            path = os.path.join(temp_dir, file_upload.name)
-            with open(path, "wb") as f:
-                f.write(file_upload.getvalue())
-                logger.info(f"File saved to temporary path: {path}")
-
-            if file_upload.name.endswith(".pdf"):
-                loader = UnstructuredPDFLoader(path)
-                file_type = "pdf"
-            elif file_upload.name.endswith(".md"):
-                loader = UnstructuredMarkdownLoader(path)
-                file_type = "md"
-            else:
-                st.error("Unsupported file type. Please upload a PDF or Markdown file.")
-                return
-        else:
+            st.error("Unsupported file type. Please upload a PDF or Markdown file.")
             return
+    else:
+        return
 
-        if file_upload:
-            if st.session_state["vector_db"] is None:
-                with st.spinner(f"Processing uploaded {file_type} file..."):
-                    st.session_state["vector_db"] = create_vector_db(file_upload, loader, temp_dir)
-                    # Store the uploaded file in session state
-                    st.session_state["file_upload"] = file_upload
-                    # Extract and store PDF pages
-                    if file_type == "pdf":
-                        with pdfplumber.open(file_upload) as pdf:
-                            st.session_state["pdf_pages"] = [page.to_image().original for page in pdf.pages]
+    if file_upload and file_upload.name not in st.session_state["uploaded_file_names"]:
+        path = os.path.join(temp_dir, file_upload.name)
+        if file_type == "md":
+            with open(path, "r", encoding="utf-8") as f:
+                st.session_state["markdown_files_content"].append(f.read())
+        if st.session_state["vector_db"] is None:
+            with st.spinner(f"Processing uploaded {file_type} file..."):
+                st.session_state["vector_db"] = create_vector_db(file_upload, loader, temp_dir)
+        else:
+            with st.spinner(f"Adding new {file_type} file to existing vector DB..."):
+                add_document_to_vector_db(file_upload, loader, temp_dir)
+        st.session_state["uploaded_file_names"].append(file_upload.name)
+        # Store the uploaded file in session state
+        st.session_state["file_upload"] = file_upload
+        # Extract and store PDF pages
+        if file_type == "pdf":
+            with pdfplumber.open(file_upload) as pdf:
+                st.session_state["pdf_pages"] = [page.to_image().original for page in pdf.pages]
+
+    if st.session_state.uploaded_file_names:
+        col1.markdown("---")
+        col1.markdown("### Uploaded Files:")
+        for file_name in st.session_state.uploaded_file_names:
+            col1.write(file_name)
+        col1.markdown("---")
 
     # Display PDF if pages are available
     if "pdf_pages" in st.session_state and st.session_state["pdf_pages"]:

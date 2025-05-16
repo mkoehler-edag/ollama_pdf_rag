@@ -1,1 +1,1 @@
-Gib mir als Liste die Werte für folgende Parameter: Batterie, Versorgungsspannung, Barometer und Betriebsgeräusch
+Gib mir als Liste die Werte für folgende Parameter: Batterie, Versorgungsspannung, Barometer, Betriebsgeräusch und Baujahr
